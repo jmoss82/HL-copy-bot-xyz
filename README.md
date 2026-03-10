@@ -26,7 +26,7 @@ You can mix standard perps and XYZ pairs in the same bot:
 COPY_COINS=BTC,ETH,xyz:GOLD
 ```
 
-Supported XYZ pairs: `xyz:XYZ100`, `xyz:TSLA`, `xyz:NVDA`, `xyz:GOLD`, `xyz:HOOD`, `xyz:INTC`, `xyz:PLTR`, `xyz:COIN`, `xyz:META`, `xyz:AAPL`, `xyz:MSFT`, `xyz:ORCL`, `xyz:GOOGL`, `xyz:AMZN`, `xyz:AMD`, `xyz:MU`, `xyz:SNDK`, `xyz:MSTR`, `xyz:CRCL`, `xyz:NFLX`, `xyz:COST`, `xyz:LLY`, `xyz:SKHX`, `xyz:TSM`, `xyz:JPY`, `xyz:EUR`, `xyz:SILVER`, `xyz:RIVN`, `xyz:BABA`, `xyz:CL`, `xyz:COPPER`, `xyz:NATGAS`, `xyz:URANIUM`, `xyz:ALUMINIUM`
+Supported XYZ pairs: `xyz:XYZ100`, `xyz:TSLA`, `xyz:NVDA`, `xyz:GOLD`, `xyz:HOOD`, `xyz:INTC`, `xyz:PLTR`, `xyz:COIN`, `xyz:META`, `xyz:AAPL`, `xyz:MSFT`, `xyz:ORCL`, `xyz:GOOGL`, `xyz:AMZN`, `xyz:AMD`, `xyz:MU`, `xyz:SNDK`, `xyz:MSTR`, `xyz:CRCL`, `xyz:NFLX`, `xyz:COST`, `xyz:LLY`, `xyz:SKHX`, `xyz:TSM`, `xyz:JPY`, `xyz:EUR`, `xyz:SILVER`, `xyz:RIVN`, `xyz:BABA`, `xyz:CL`, `xyz:COPPER`, `xyz:NATGAS`, `xyz:URANIUM`, `xyz:ALUMINIUM`, `xyz:BRENTOIL`
 
 ## Files
 

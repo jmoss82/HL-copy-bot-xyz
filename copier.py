@@ -59,6 +59,7 @@ XYZ_ASSET_IDS: Dict[str, int] = {
     "xyz:NATGAS":    110031,
     "xyz:URANIUM":   110032,
     "xyz:ALUMINIUM": 110033,
+    "xyz:BRENTOIL":  110049,
 }
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
