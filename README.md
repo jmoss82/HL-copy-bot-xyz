@@ -5,9 +5,10 @@ Monitors a target trader's positions on HyperLiquid in real-time and mirrors the
 ## How It Works
 
 1. **Poll** the target wallet every 3 seconds via the public `/info` API (no auth needed)
-2. **Compute desired position** for your account based on configured sizing
-3. **Reconcile gap** between desired and your actual position each poll
-4. **Execute** an IOC limit order through the spread on your account
+2. **Open a lifecycle session** when the target goes from flat to nonzero on a copied coin
+3. **Anchor your size** using the configured sizing mode, then keep a copy ratio for that trade lifecycle
+4. **Mirror staged adds, trims, closes, and flips** as the target position evolves over time
+5. **Execute** an IOC limit order through the spread on your account
 
 Standard perps use the official HL SDK. XYZ HIP-3 pairs use raw `sign_l1_action` — the SDK does not support `xyz:` coins natively.
 
@@ -31,7 +32,7 @@ Supported XYZ pairs: `xyz:XYZ100`, `xyz:TSLA`, `xyz:NVDA`, `xyz:GOLD`, `xyz:HOOD
 
 | File | Purpose |
 |---|---|
-| `bot.py` | Main entry point, async loop, startup sync, heartbeat logging |
+| `bot.py` | Main entry point, async loop, startup sync, lifecycle reconciliation, heartbeat logging |
 | `config.py` | All settings loaded from environment variables with defaults |
 | `tracker.py` | Polls target wallet for both standard and XYZ positions, diffs changes |
 | `copier.py` | Executes mirrored trades — SDK for standard perps, sign_l1_action for XYZ |
@@ -59,8 +60,8 @@ On restart, the bot checks what the target currently has open. Any coins the tar
 
 | Variable | Default | Description |
 |---|---|---|
-| `COPY_SCALING_MODE` | `fixed_notional` | Trade a fixed USD amount per signal |
-| `COPY_FIXED_NOTIONAL_USD` | `20` | USD notional per trade |
+| `COPY_SCALING_MODE` | `fixed_notional` | Anchor each new lifecycle with a fixed USD amount |
+| `COPY_FIXED_NOTIONAL_USD` | `20` | USD notional used when the target opens a new lifecycle |
 | `COPY_MAX_TRADE_USD` | `40` | Per-trade notional cap |
 | `COPY_LEVERAGE` | `5` | Leverage applied to your positions |
 | `COPY_IS_CROSS` | `false` | Isolated margin (XYZ always uses isolated regardless) |
@@ -68,18 +69,26 @@ On restart, the bot checks what the target currently has open. Any coins the tar
 | `COPY_SYNC_STARTUP` | `false` | Wait for next entry rather than entering existing positions |
 | `COPY_MIN_TRADE_USD` | `11` | Skip trades below this notional (HL minimum ~$10) |
 | `COPY_MAX_POSITION_USD` | `200` | Hard cap on resulting position exposure |
-| `COPY_RECONCILE_MODE` | `state` | Each poll reconciles desired vs actual position |
+| `COPY_RECONCILE_MODE` | `lifecycle` | Mirror the target's full trade lifecycle instead of only the net state |
 | `COPY_POLL_INTERVAL` | `3.0` | Seconds between target polls |
 | `COPY_SLIPPAGE_BPS` | `10.0` | Max slippage for IOC orders (basis points) |
 | `COPY_MAX_DAILY_TRADES` | `200` | Kill switch if something goes wrong |
 | `COPY_DRY_RUN` | `false` | Live trading |
 | `COPY_LOG_LEVEL` | `INFO` | `DEBUG` for verbose output |
 
+## Reconcile Modes
+
+- `state`: each poll targets a global desired position on your account.
+- `delta`: trades only when the target's net position changes between snapshots.
+- `lifecycle`: anchors a copy ratio when the target opens, then mirrors staged adds, trims, closes, and flips throughout that trade's lifecycle.
+
+`lifecycle` is the best fit for wallets that scale in and out over time, whether they trade standard perps, XYZ HIP-3 pairs, or a mix of both.
+
 ## Startup Behaviour
 
-By default (`COPY_SYNC_STARTUP=false`), the bot locks any coins the target already has open at startup and waits for them to close before following the next entry. This avoids entering mid-position at an unfavourable price.
+By default (`COPY_SYNC_STARTUP=false`), the bot locks any coins the target already has open at startup and waits for them to close before following the next entry. In `lifecycle` mode this means the bot waits for a fresh `flat -> open` transition before anchoring a new copy ratio.
 
-Set `COPY_SYNC_STARTUP=true` only when recovering from a crash where the bot was already in a position and needs to re-sync immediately.
+Set `COPY_SYNC_STARTUP=true` only when recovering from a crash where the bot was already in a position and needs to re-sync immediately. In `lifecycle` mode this joins the target's current lifecycle using the current observed position as the anchor.
 
 ## Risk Guards
 

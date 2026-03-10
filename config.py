@@ -47,7 +47,7 @@ class CopyBotConfig:
 
     # -- Polling ----------------------------------------------------
     poll_interval_seconds: float = 3.0
-    reconcile_mode: str = "state"  # "state" (recommended) or "delta"
+    reconcile_mode: str = "state"  # "state", "delta", or "lifecycle"
 
     # -- Execution --------------------------------------------------
     slippage_bps: float = 10.0        # max slippage for IOC limit orders
@@ -113,5 +113,7 @@ def validate_config(cfg: CopyBotConfig) -> None:
         raise ValueError(f"Invalid wallet address: {cfg.wallet_address}")
     if not cfg.private_key.startswith("0x") or len(cfg.private_key) != 66:
         raise ValueError("Invalid private key format")
-    if cfg.reconcile_mode not in {"state", "delta"}:
-        raise ValueError("COPY_RECONCILE_MODE must be 'state' or 'delta'")
+    if cfg.reconcile_mode not in {"state", "delta", "lifecycle"}:
+        raise ValueError(
+            "COPY_RECONCILE_MODE must be 'state', 'delta', or 'lifecycle'"
+        )

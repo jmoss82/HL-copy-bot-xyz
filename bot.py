@@ -14,6 +14,7 @@ import sys
 import signal
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -21,6 +22,18 @@ from loguru import logger
 from config import load_config, validate_config, CopyBotConfig
 from tracker import PositionTracker
 from copier import TradeCopier
+
+
+@dataclass
+class LifecycleSession:
+    """Mirror state for one target position lifecycle."""
+    coin: str
+    direction: int
+    target_anchor_size: float
+    our_anchor_size: float
+    copy_ratio: float
+    last_target_size: float
+    opened_at: float
 
 
 class CopyBot:
@@ -38,6 +51,7 @@ class CopyBot:
         self.tracker = PositionTracker(config.target_address)
         self.copier = TradeCopier(config)
         self._sim_positions: dict = {}
+        self._lifecycle_sessions: dict[str, LifecycleSession] = {}
 
         self.running = False
         self.start_time: float = 0.0
@@ -87,7 +101,9 @@ class CopyBot:
                 f"(entry ${self._fmt_price(data['entry_px'])}, {data['leverage']}x)"
             )
 
-        if self.config.sync_on_startup:
+        if self.config.reconcile_mode == "lifecycle":
+            self._startup_sync_lifecycle(filtered)
+        elif self.config.sync_on_startup:
             logger.info("sync_on_startup=True - matching target positions now")
 
             our_positions = self.copier.get_our_positions()
@@ -175,21 +191,22 @@ class CopyBot:
                             self._record_position_change(change.coin, scaled)
                             self.trades_executed += 1
                 else:
-                    # State-based reconciliation: each poll aims for target alignment.
                     self.tracker.seed(filtered)
-
-                    # Unlock coins where the target has closed their startup position.
-                    for coin in list(self._startup_locked_coins):
-                        if abs(filtered.get(coin, {}).get("size", 0.0)) < 1e-10:
-                            self._startup_locked_coins.discard(coin)
-                            logger.info(
-                                f"{coin}: startup lock released - will follow next entry"
-                            )
+                    self._release_startup_locks(filtered)
 
                     our_positions = self._effective_positions()
                     for coin in self._coins_to_reconcile(filtered, our_positions):
                         if coin in self._startup_locked_coins:
                             continue
+
+                        if self.config.reconcile_mode == "lifecycle":
+                            self._reconcile_lifecycle_coin(
+                                coin,
+                                filtered.get(coin, {}).get("size", 0.0),
+                                our_positions.get(coin, 0.0),
+                            )
+                            continue
+
                         target_size = filtered.get(coin, {}).get("size", 0.0)
                         desired_size = self.copier.target_position_to_desired_size(
                             coin, target_size, self.tracker.target_equity
@@ -265,6 +282,8 @@ class CopyBot:
             f"Runtime: {hours}h{mins:02d}m",
             f"Trades: {self.trades_executed}",
         ]
+        if self.config.reconcile_mode == "lifecycle":
+            parts.append(f"Sessions: {len(self._lifecycle_sessions)}")
 
         # Target position summary
         for coin, data in target_positions.items():
@@ -297,6 +316,218 @@ class CopyBot:
         if self.config.dry_run:
             return dict(self._sim_positions)
         return self.copier.get_our_positions()
+
+    def _startup_sync_lifecycle(self, filtered: dict) -> None:
+        """Seed lifecycle sessions or join currently open target positions."""
+        if self.config.sync_on_startup:
+            logger.info("sync_on_startup=True - joining target lifecycle now")
+            our_positions = self._effective_positions()
+
+            for coin, data in filtered.items():
+                target_size = data["size"]
+                session = self._build_lifecycle_session(coin, target_size)
+                if session is None:
+                    continue
+
+                self._lifecycle_sessions[coin] = session
+                current_size = our_positions.get(coin, 0.0)
+                delta = session.our_anchor_size - current_size
+                if abs(delta) < 1e-10:
+                    logger.info(
+                        f"SESSION JOIN {coin}: already aligned "
+                        f"(target={target_size:+.6f}, ours={current_size:+.6f})"
+                    )
+                    continue
+
+                logger.warning(
+                    f"SESSION JOIN {coin}: target={target_size:+.6f}, "
+                    f"desired={session.our_anchor_size:+.6f}, ours={current_size:+.6f}, "
+                    f"ratio={session.copy_ratio:.8f}"
+                )
+                result = self.copier.execute(coin, delta, dry_run=self.config.dry_run)
+                if result and result.success:
+                    self._record_position_change(coin, delta)
+                    self.trades_executed += 1
+        else:
+            self._startup_locked_coins = set(filtered.keys())
+            for coin in self._startup_locked_coins:
+                logger.info(
+                    f"  {coin}: target already in position - locked until they close"
+                )
+
+    def _release_startup_locks(self, target_positions: dict) -> None:
+        """Unlock coins after the target fully closes the startup position."""
+        for coin in list(self._startup_locked_coins):
+            if abs(target_positions.get(coin, {}).get("size", 0.0)) < 1e-10:
+                self._startup_locked_coins.discard(coin)
+                logger.info(f"{coin}: startup lock released - will follow next entry")
+
+    def _reconcile_lifecycle_coin(
+        self,
+        coin: str,
+        target_size: float,
+        current_size: float,
+    ) -> None:
+        """Mirror the target's full position lifecycle for one coin."""
+        session = self._lifecycle_sessions.get(coin)
+
+        if abs(target_size) < 1e-10:
+            if session is None:
+                if abs(current_size) > 1e-10:
+                    logger.warning(
+                        f"{coin}: target flat but ours={current_size:+.6f} "
+                        "with no active lifecycle session"
+                    )
+                return
+
+            logger.warning(
+                f"SESSION CLOSE {coin}: target flat | ours={current_size:+.6f}"
+            )
+            result = self.copier.execute(
+                coin,
+                -current_size,
+                dry_run=self.config.dry_run,
+            )
+            if result and result.success:
+                self._record_position_change(coin, -current_size)
+                self.trades_executed += 1
+                self._lifecycle_sessions.pop(coin, None)
+            elif abs(current_size) < 1e-10:
+                self._lifecycle_sessions.pop(coin, None)
+            return
+
+        if session is None:
+            session = self._build_lifecycle_session(coin, target_size)
+            if session is None:
+                return
+
+            self._lifecycle_sessions[coin] = session
+            desired_size = session.our_anchor_size
+            delta = desired_size - current_size
+            logger.warning(
+                f"SESSION OPEN {coin}: target={target_size:+.6f}, "
+                f"desired={desired_size:+.6f}, ours={current_size:+.6f}, "
+                f"ratio={session.copy_ratio:.8f}"
+            )
+            if abs(delta) < 1e-10:
+                return
+
+            result = self.copier.execute(coin, delta, dry_run=self.config.dry_run)
+            if result and result.success:
+                self._record_position_change(coin, delta)
+                self.trades_executed += 1
+            return
+
+        target_direction = 1 if target_size > 0 else -1
+        if target_direction != session.direction:
+            self._handle_lifecycle_flip(coin, target_size, current_size, session)
+            return
+
+        desired_size = target_size * session.copy_ratio
+        delta = desired_size - current_size
+        target_change = target_size - session.last_target_size
+
+        if abs(delta) < 1e-10:
+            session.last_target_size = target_size
+            return
+
+        if abs(target_change) < 1e-10:
+            action = "REBALANCE"
+        elif abs(target_size) > abs(session.last_target_size):
+            action = "SCALE IN"
+        else:
+            action = "TRIM"
+
+        logger.warning(
+            f"SESSION {action} {coin}: target {session.last_target_size:+.6f} -> "
+            f"{target_size:+.6f}, desired={desired_size:+.6f}, ours={current_size:+.6f}"
+        )
+        result = self.copier.execute(coin, delta, dry_run=self.config.dry_run)
+        if result and result.success:
+            self._record_position_change(coin, delta)
+            self.trades_executed += 1
+        session.last_target_size = target_size
+
+    def _handle_lifecycle_flip(
+        self,
+        coin: str,
+        target_size: float,
+        current_size: float,
+        session: LifecycleSession,
+    ) -> None:
+        """Close the old lifecycle session before opening the new direction."""
+        logger.warning(
+            f"SESSION FLIP {coin}: {session.last_target_size:+.6f} -> {target_size:+.6f}"
+        )
+
+        if abs(current_size) > 1e-10:
+            close_result = self.copier.execute(
+                coin,
+                -current_size,
+                dry_run=self.config.dry_run,
+            )
+            if close_result and close_result.success:
+                self._record_position_change(coin, -current_size)
+                self.trades_executed += 1
+                current_size = 0.0
+            else:
+                logger.warning(
+                    f"SESSION FLIP {coin}: close leg did not complete; "
+                    "will retry next poll"
+                )
+                return
+
+        self._lifecycle_sessions.pop(coin, None)
+        new_session = self._build_lifecycle_session(coin, target_size)
+        if new_session is None:
+            return
+
+        self._lifecycle_sessions[coin] = new_session
+        open_delta = new_session.our_anchor_size - current_size
+        logger.warning(
+            f"SESSION OPEN {coin}: target={target_size:+.6f}, "
+            f"desired={new_session.our_anchor_size:+.6f}, ours={current_size:+.6f}, "
+            f"ratio={new_session.copy_ratio:.8f}"
+        )
+        if abs(open_delta) < 1e-10:
+            return
+
+        open_result = self.copier.execute(
+            coin,
+            open_delta,
+            dry_run=self.config.dry_run,
+        )
+        if open_result and open_result.success:
+            self._record_position_change(coin, open_delta)
+            self.trades_executed += 1
+
+    def _build_lifecycle_session(
+        self,
+        coin: str,
+        target_size: float,
+    ) -> LifecycleSession | None:
+        """Create lifecycle session state anchored to the target's current size."""
+        desired_size = self.copier.target_position_to_desired_size(
+            coin,
+            target_size,
+            self.tracker.target_equity,
+        )
+        if abs(target_size) < 1e-10 or abs(desired_size) < 1e-10:
+            logger.warning(
+                f"SESSION OPEN {coin}: could not build lifecycle anchor "
+                f"(target={target_size:+.6f}, desired={desired_size:+.6f})"
+            )
+            return None
+
+        return LifecycleSession(
+            coin=coin,
+            direction=1 if target_size > 0 else -1,
+            target_anchor_size=target_size,
+            our_anchor_size=desired_size,
+            copy_ratio=desired_size / target_size,
+            last_target_size=target_size,
+            opened_at=time.time(),
+        )
 
     def _record_position_change(self, coin: str, delta: float) -> None:
         """Track synthetic position changes when dry-run mode is active."""
