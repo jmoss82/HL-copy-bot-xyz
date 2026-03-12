@@ -65,6 +65,11 @@ XYZ_ASSET_IDS: Dict[str, int] = {
 INFO_URL = "https://api.hyperliquid.xyz/info"
 
 
+def normalize_xyz_coin_name(name: str) -> str:
+    """Normalize XYZ symbols to the canonical `xyz:NAME` form."""
+    return name if name.startswith("xyz:") else f"xyz:{name}"
+
+
 @dataclass
 class TradeResult:
     """Outcome of a single copy-trade execution."""
@@ -166,7 +171,7 @@ class TradeCopier:
                 )
                 xyz_meta = resp.json()
                 for asset in xyz_meta.get("universe", []):
-                    name = f"xyz:{asset['name']}"
+                    name = normalize_xyz_coin_name(asset["name"])
                     self._xyz_sz_decimals[name] = asset.get("szDecimals", 4)
                 logger.info(f"Loaded metadata for {len(self._xyz_sz_decimals)} XYZ pairs")
             except Exception as e:
@@ -278,7 +283,7 @@ class TradeCopier:
                 contexts = data[1]
                 for idx, asset in enumerate(universe):
                     if idx < len(contexts):
-                        c = f"xyz:{asset['name']}"
+                        c = normalize_xyz_coin_name(asset["name"])
                         mark_px = float(contexts[idx].get("markPx") or 0)
                         if mark_px > 0:
                             self._xyz_mids_cache[c] = mark_px
