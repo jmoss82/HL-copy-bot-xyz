@@ -1,102 +1,170 @@
-# HyperLiquid Copy Trading Bot — XYZ HIP-3
+# HyperLiquid HIP-3 Copy Bot
 
-Monitors a target trader's positions on HyperLiquid in real-time and mirrors their trades onto your account. Supports both standard HL perps **and XYZ HIP-3 pairs** (e.g. `xyz:GOLD`, `xyz:SILVER`, `xyz:TSLA`).
+This folder is a standalone copy bot for HyperLiquid HIP-3 (`xyz:*`) pairs.
 
-## How It Works
+It is intentionally separate from the standard-perp copy bots. The orchestration model matches `copy-bot-4`, but the market/execution layer is HIP-3-specific and follows the proven patterns from the archived `grid-bot` client.
 
-1. **Poll** the target wallet every 3 seconds via the public `/info` API (no auth needed)
-2. **Open a lifecycle session** when the target goes from flat to nonzero on a copied coin
-3. **Anchor your size** using the configured sizing mode, then keep a copy ratio for that trade lifecycle
-4. **Mirror staged adds, trims, closes, and flips** as the target position evolves over time
-5. **Execute** an IOC limit order through the spread on your account
+## Source Of Truth
 
-Standard perps use the official HL SDK. XYZ HIP-3 pairs use raw `sign_l1_action` — the SDK does not support `xyz:` coins natively.
+The source of truth for this bot is:
 
-## XYZ HIP-3 Coins
+1. the code in this folder
+2. the environment variables supplied at runtime (`.env` locally or Railway variables in production)
 
-XYZ pairs use the `xyz:` prefix in `COPY_COINS`. Example:
+This README is meant to track structure and current defaults, but actual live wallet addresses, copied coins, leverage, and limits come from runtime environment variables.
 
-```
-COPY_COINS=xyz:GOLD,xyz:SILVER,xyz:TSLA
-```
+## Current Status
 
-You can mix standard perps and XYZ pairs in the same bot:
+- Project scaffold created on 2026-03-24.
+- HIP-3-specific tracker, client, copier, and bot loop are in place.
+- Python syntax check passed for all files in this folder.
+- Subaccount setup is currently blocked: HyperLiquid requires $100,000 total trading volume before subaccounts can be created.
+- Current total trading volume is approximately $66,000 as of 2026-03-24.
+- Live API behavior has not been validated yet.
+- No live wallet, subaccount, or Railway deployment has been configured yet.
 
-```
-COPY_COINS=BTC,ETH,xyz:GOLD
-```
+## Scope
 
-Supported XYZ pairs: `xyz:XYZ100`, `xyz:TSLA`, `xyz:NVDA`, `xyz:GOLD`, `xyz:HOOD`, `xyz:INTC`, `xyz:PLTR`, `xyz:COIN`, `xyz:META`, `xyz:AAPL`, `xyz:MSFT`, `xyz:ORCL`, `xyz:GOOGL`, `xyz:AMZN`, `xyz:AMD`, `xyz:MU`, `xyz:SNDK`, `xyz:MSTR`, `xyz:CRCL`, `xyz:NFLX`, `xyz:COST`, `xyz:LLY`, `xyz:SKHX`, `xyz:TSM`, `xyz:JPY`, `xyz:EUR`, `xyz:SILVER`, `xyz:RIVN`, `xyz:BABA`, `xyz:CL`, `xyz:COPPER`, `xyz:NATGAS`, `xyz:URANIUM`, `xyz:ALUMINIUM`, `xyz:BRENTOIL`
+- HIP-3 only
+- isolated wallet / isolated deployment
+- one copied wallet per bot instance
+- one configured set of `xyz:*` coins per instance
+
+## Runtime Flow
+
+1. Poll the copied wallet on the `xyz` dex.
+2. Filter to configured HIP-3 coins.
+3. Detect changes using `state`, `delta`, or `lifecycle` reconciliation.
+4. Convert target size into our desired HIP-3 size.
+5. Execute signed HIP-3 orders through `/exchange`.
+
+## Current Defaults
+
+These are the current defaults in [config.py](C:/Users/jmoss/Desktop/Project%20Money%202/copy-bot-hip3/config.py):
+
+| Variable | Current default |
+|---|---|
+| `COPY_SCALING_MODE` | `fixed_notional` |
+| `COPY_FIXED_RATIO` | `1.0` |
+| `COPY_FIXED_SIZE` | `1.0` |
+| `COPY_FIXED_NOTIONAL_USD` | `20.0` |
+| `COPY_MAX_TRADE_USD` | `0.0` |
+| `COPY_MAX_POSITION_USD` | `200.0` |
+| `COPY_LEVERAGE` | `5` |
+| `COPY_POLL_INTERVAL` | `3.0` |
+| `COPY_RECONCILE_MODE` | `lifecycle` |
+| `COPY_SLIPPAGE_BPS` | `10.0` |
+| `COPY_MIN_TRADE_USD` | `11.0` |
+| `COPY_COINS` | `xyz:SILVER` |
+| `COPY_SYNC_STARTUP` | `false` |
+| `COPY_MAX_DAILY_TRADES` | `200` |
+| `COPY_DRY_RUN` | `true` |
+| `COPY_LOG_LEVEL` | `INFO` |
+
+Required values with no meaningful default:
+
+- `HL_WALLET_ADDRESS`
+- `HL_PRIVATE_KEY`
+- `COPY_TARGET_ADDRESS`
+
+Optional runtime value:
+
+- `HL_ACCOUNT_ADDRESS`
+  If omitted, it defaults to `HL_WALLET_ADDRESS`.
+
+## Platform Notes
+
+These notes are based on current HyperLiquid docs and are important for how this bot should be deployed.
+
+### Account Model
+
+- HyperLiquid API wallets are signer wallets only.
+- To query account data, use the actual master account or subaccount address, not the API wallet address.
+- If trading on behalf of a subaccount, requests should be signed by the master account and `vaultAddress` should be set to the subaccount address.
+
+Implication for this bot:
+
+- `HL_WALLET_ADDRESS` / `HL_PRIVATE_KEY` should represent the signer.
+- `HL_ACCOUNT_ADDRESS` should represent the trading account address.
+- If a subaccount is used, `HL_ACCOUNT_ADDRESS` should be that subaccount address.
+
+### Nonces / API Wallets
+
+- Nonces are tracked per signer, not per trading account.
+- Multiple bots sharing the same API wallet can collide on nonce usage, even if they trade different subaccounts.
+- HyperLiquid recommends a separate API wallet per trading process, and specifically recommends separate API wallets for separate subaccounts.
+
+Implication for this bot:
+
+- Do not reuse the same API wallet across multiple parallel bots if avoidable.
+- Best practice is one dedicated API wallet for this HIP-3 bot.
+
+### Rate Limits
+
+- REST and websocket IP-based limits apply per IP address.
+- Address-based action limits apply per user, with subaccounts treated as separate users.
+- Address-based rate limits apply to trading actions, not info requests.
+
+Implication for this bot:
+
+- A subaccount helps isolate account-level trading limits and margin risk.
+- A subaccount does not fully isolate IP-based limits if all bots run behind the same Railway egress IP.
+- A new API key alone should not be assumed to isolate rate limits.
+
+### Subaccounts
+
+- HyperLiquid docs currently state that up to 10 subaccounts can be created after reaching $100,000 in volume.
+- Subaccounts share fee tiers with the master account.
+- API wallet count starts at 3 for all master accounts and increases by 2 per subaccount.
+
+Current recommendation for this project:
+
+1. Use a separate subaccount for HIP-3 if the master account is eligible.
+2. Use a separate API wallet for this HIP-3 bot.
+3. Treat `HL_ACCOUNT_ADDRESS` as the subaccount trading address.
+4. Keep this bot on its own Railway service.
+5. Still assume some IP-based rate limits may be shared with other bots.
+
+### Remaining Unknowns
+
+- When the master account will cross the $100,000 volume threshold for subaccount creation.
+- Whether the chosen master account already has subaccount capability enabled.
+- Whether Railway egress for this service will effectively share the same IP budget as the other bots.
+- Whether the current SDK + this bot's HIP-3 order path works cleanly when `HL_ACCOUNT_ADDRESS` is a subaccount address.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `bot.py` | Main entry point, async loop, startup sync, lifecycle reconciliation, heartbeat logging |
-| `config.py` | All settings loaded from environment variables with defaults |
-| `tracker.py` | Polls target wallet for both standard and XYZ positions, diffs changes |
-| `copier.py` | Executes mirrored trades — SDK for standard perps, sign_l1_action for XYZ |
+- `bot.py`: main process, startup sync, polling loop, lifecycle/state reconciliation
+- `config.py`: environment loading and validation
+- `tracker.py`: target-wallet polling on `dex="xyz"`
+- `hip3_client.py`: HIP-3 metadata, pricing, positions, leverage, and signed actions
+- `copier.py`: copy-bot sizing, guards, and execution wrapper
+- `.env.example`: local config template
+- `requirements.txt`: Python dependencies
 
-## Deployment (Railway)
+## Important Differences From Standard Copy Bots
 
-Railway is the source of truth for all configuration. Set environment variables in the service's Variables tab — no `.env` file needed. Entry point is `python bot.py`.
+- `COPY_COINS` must be `xyz:*` symbols.
+- Price and size formatting come from HIP-3 metadata.
+- Positions are queried from `user_state(..., dex="xyz")`.
+- Account balance/equity still comes from the default account state, not `dex="xyz"`.
+- Leverage is per-coin isolated margin.
 
-**Every push to the repo triggers a redeploy on Railway, which restarts the bot.**
+## Run
 
-On restart, the bot checks what the target currently has open. Any coins the target is already in are locked — the bot waits for them to close before following the next entry. `COPY_SYNC_STARTUP=true` overrides this and immediately enters to match the target.
+```bash
+python bot.py
+```
 
-## Environment Variables
+Start in dry run. Prove metadata reads, position reads, and one tiny live order on the isolated account before trusting the full copy loop.
 
-**Required:**
+## Reference Docs
 
-| Variable | Description |
-|---|---|
-| `HL_WALLET_ADDRESS` | Your signer wallet address |
-| `HL_PRIVATE_KEY` | Your private key |
-| `HL_ACCOUNT_ADDRESS` | Your trading account (agent wallet) |
-| `COPY_TARGET_ADDRESS` | Wallet address of the trader to copy |
-
-**Configurable:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `COPY_SCALING_MODE` | `fixed_notional` | Anchor each new lifecycle with a fixed USD amount |
-| `COPY_FIXED_NOTIONAL_USD` | `20` | USD notional used when the target opens a new lifecycle |
-| `COPY_MAX_TRADE_USD` | `40` | Per-trade notional cap |
-| `COPY_LEVERAGE` | `5` | Leverage applied to your positions |
-| `COPY_IS_CROSS` | `false` | Isolated margin (XYZ always uses isolated regardless) |
-| `COPY_COINS` | — | Coins to copy, comma-separated, use `xyz:` prefix for XYZ pairs |
-| `COPY_SYNC_STARTUP` | `false` | Wait for next entry rather than entering existing positions |
-| `COPY_MIN_TRADE_USD` | `11` | Skip trades below this notional (HL minimum ~$10) |
-| `COPY_MAX_POSITION_USD` | `200` | Hard cap on resulting position exposure |
-| `COPY_RECONCILE_MODE` | `lifecycle` | Mirror the target's full trade lifecycle instead of only the net state |
-| `COPY_POLL_INTERVAL` | `3.0` | Seconds between target polls |
-| `COPY_SLIPPAGE_BPS` | `10.0` | Max slippage for IOC orders (basis points) |
-| `COPY_MAX_DAILY_TRADES` | `200` | Kill switch if something goes wrong |
-| `COPY_DRY_RUN` | `false` | Live trading |
-| `COPY_LOG_LEVEL` | `INFO` | `DEBUG` for verbose output |
-
-## Reconcile Modes
-
-- `state`: each poll targets a global desired position on your account.
-- `delta`: trades only when the target's net position changes between snapshots.
-- `lifecycle`: anchors a copy ratio when the target opens, then mirrors staged adds, trims, closes, and flips throughout that trade's lifecycle.
-
-`lifecycle` is the best fit for wallets that scale in and out over time, whether they trade standard perps, XYZ HIP-3 pairs, or a mix of both.
-
-## Startup Behaviour
-
-By default (`COPY_SYNC_STARTUP=false`), the bot locks any coins the target already has open at startup and waits for them to close before following the next entry. In `lifecycle` mode this means the bot waits for a fresh `flat -> open` transition before anchoring a new copy ratio.
-
-Set `COPY_SYNC_STARTUP=true` only when recovering from a crash where the bot was already in a position and needs to re-sync immediately. In `lifecycle` mode this joins the target's current lifecycle using the current observed position as the anchor.
-
-## Risk Guards
-
-- `COPY_MAX_TRADE_USD` caps a single order's notional.
-- `COPY_MAX_POSITION_USD` caps resulting position exposure after each trade.
-- `COPY_MIN_TRADE_USD` filters out orders below the exchange minimum.
-- `COPY_MAX_DAILY_TRADES` halts trading if the daily limit is hit.
-
-## Local Development
-
-If running locally, create a `.env` file based on `.env.example`. Railway variables take precedence in production and no `.env` file is needed there.
+- HyperLiquid API wallets / nonces:
+  https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets
+- HyperLiquid exchange endpoint:
+  https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint
+- HyperLiquid rate limits:
+  https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits
+- HyperLiquid subaccounts:
+  https://hyperliquid.gitbook.io/hyperliquid-docs/trading/sub-accounts
